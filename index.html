@@ -629,6 +629,10 @@
   .toggle-row:last-child{border-bottom:none}
   .toggle-row small{display:block; font-size:11.5px; color:var(--fg-dim); margin-top:2px}
   .toggle-row input{flex:0 0 auto; width:22px; height:22px; accent-color:var(--accent)}
+  .sheet-in{
+    width:100%; margin-bottom:8px; background:var(--surface-2); border:1px solid var(--border); border-radius:10px;
+    padding:11px 12px; font-family:'JetBrains Mono'; font-size:14px; color:var(--fg); -webkit-appearance:none; appearance:none;
+  }
   .btn-row{display:flex; gap:8px}
   .ghost-btn{
     flex:1; background:var(--surface-2); color:var(--fg); border:1px solid var(--border); border-radius:10px;
@@ -773,6 +777,18 @@
       <label class="toggle-row"><span>Iniciar descanso ao marcar uma série<small>O cronômetro dispara sozinho</small></span><input type="checkbox" id="setAutoRest"></label>
       <label class="toggle-row"><span>Manter a tela ligada no treino<small>Evita o iPhone apagar entre as séries</small></span><input type="checkbox" id="setWake"></label>
       <label class="toggle-row"><span>Som e vibração ao fim do descanso<small>No iPhone o som toca com a tela ligada</small></span><input type="checkbox" id="setSound"></label>
+    </div>
+
+    <div class="card-block">
+      <div class="block-head"><b>Planilha Google</b><span id="sheetState">desligada</span></div>
+      <div class="water-hint" style="margin:0 0 10px">Envia seu dia (treino, água, refeições, peso) para a planilha sozinho, poucos segundos depois de cada marcação.</div>
+      <input id="sheetUrl" class="sheet-in" type="url" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Endereço do Apps Script (termina em /exec)">
+      <input id="sheetKey" class="sheet-in" type="text" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Chave">
+      <div class="btn-row">
+        <button type="button" class="ghost-btn" id="sheetSave">Salvar</button>
+        <button type="button" class="ghost-btn" id="sheetNow">Enviar agora</button>
+      </div>
+      <div class="water-hint" id="sheetMsg" style="margin-top:10px"></div>
     </div>
 
     <div class="card-block">
@@ -1931,6 +1947,7 @@
     weights[todayStr] = val;
     saveWeights(weights);
     remoteSetWeight(todayStr, val);
+    scheduleSheetSync();
     renderWeight();
     renderWeek();
   });
@@ -2324,9 +2341,88 @@
     }
   });
 
+  /* ---------------- planilha Google (Apps Script) ----------------
+     Envia os últimos 14 dias; o script atualiza pela data, então reenviar nunca duplica. */
+  var SHEET_CFG_KEY = 'td_v2_sheet';
+  var sheetCfg = (function(){
+    try{ var c = JSON.parse(localStorage.getItem(SHEET_CFG_KEY) || '{}'); return c && typeof c === 'object' ? c : {}; }
+    catch(e){ return {}; }
+  })();
+  var sheetUrlEl = document.getElementById('sheetUrl'), sheetKeyEl = document.getElementById('sheetKey');
+  var sheetStateEl = document.getElementById('sheetState'), sheetMsgEl = document.getElementById('sheetMsg');
+  sheetUrlEl.value = sheetCfg.url || '';
+  sheetKeyEl.value = sheetCfg.key || '';
+  var sheetTimer = 0, sheetBusy = false;
+
+  function sheetStatus(state, msg){
+    sheetStateEl.textContent = state;
+    sheetMsgEl.textContent = msg || '';
+  }
+  function sheetReady(){ return !!(sheetCfg.url && sheetCfg.key); }
+  function scheduleSheetSync(){
+    if(!sheetReady()) return;
+    clearTimeout(sheetTimer);
+    sheetTimer = setTimeout(function(){ syncSheet(false); }, 4000);
+  }
+  function buildSheetPayload(){
+    var days = [], wmap = {};
+    Object.keys(history).sort().slice(-14).forEach(function(d){
+      var r = history[d];
+      if(!(r.exDone > 0 || r.waterMl > 0 || r.water > 0 || r.mealsDone > 0 || weights[d] != null)) return;
+      days.push({
+        date:d, exDone:r.exDone || 0, exTotal:r.exTotal || 0,
+        waterMl: r.waterMl != null ? r.waterMl : (r.water || 0) * CUP_ML,
+        mealsDone:r.mealsDone || 0, mealsList:r.mealsList || '',
+        setsDone:r.setsDone || 0, volume:r.volume || 0, kcal:r.kcal || 0
+      });
+    });
+    Object.keys(weights).sort().slice(-14).forEach(function(d){ wmap[d] = weights[d]; });
+    return { token:sheetCfg.key, days:days, weights:wmap };
+  }
+  async function syncSheet(manual){
+    if(!sheetReady()){ if(manual) sheetStatus('desligada', 'Preencha o endereço e a chave e toque em Salvar.'); return; }
+    if(sheetBusy){ scheduleSheetSync(); return; }
+    sheetBusy = true;
+    sheetStatus('enviando…', manual ? 'Enviando para a planilha…' : '');
+    var body = JSON.stringify(buildSheetPayload());
+    try{
+      var res = await fetch(sheetCfg.url, { method:'POST', headers:{ 'Content-Type':'text/plain;charset=utf-8' }, body:body, redirect:'follow' });
+      var out = await res.json();
+      if(out && out.ok){
+        sheetStatus('ligada ✓', 'Última sincronização: ' + new Date().toLocaleTimeString('pt-BR', {hour:'2-digit', minute:'2-digit'}) + ' (' + out.dias + ' dias)');
+      }else{
+        sheetStatus('erro', 'A planilha recusou: ' + ((out && out.error) || 'resposta inesperada') + '.');
+      }
+    }catch(e){
+      // sem permissão para ler a resposta (CORS): tenta enviar mesmo assim, sem confirmação
+      try{
+        await fetch(sheetCfg.url, { method:'POST', mode:'no-cors', headers:{ 'Content-Type':'text/plain;charset=utf-8' }, body:body });
+        sheetStatus('enviado', 'Enviado, mas sem confirmação de recebimento. Confira na planilha.');
+      }catch(e2){
+        sheetStatus('sem conexão', 'Não consegui enviar agora. Tento de novo na próxima marcação.');
+      }
+    }
+    sheetBusy = false;
+  }
+  document.getElementById('sheetSave').addEventListener('click', function(){
+    sheetCfg = { url: sheetUrlEl.value.trim(), key: sheetKeyEl.value.trim() };
+    try{ localStorage.setItem(SHEET_CFG_KEY, JSON.stringify(sheetCfg)); }catch(e){}
+    if(sheetReady()){ sheetStatus('salvo', 'Configuração salva. Toque em "Enviar agora" para testar.'); }
+    else sheetStatus('desligada', 'Campos vazios: sincronização desligada.');
+  });
+  document.getElementById('sheetNow').addEventListener('click', function(){
+    sheetCfg = { url: sheetUrlEl.value.trim(), key: sheetKeyEl.value.trim() };
+    syncSheet(true);
+  });
+  sheetStatus(sheetReady() ? 'ligada' : 'desligada', '');
+  /* antes do appReady o histórico ainda está sendo carregado: o gancho vale a partir daqui */
+  var _recordHistory = recordHistory;
+  recordHistory = function(date, patch){ _recordHistory(date, patch); scheduleSheetSync(); };
+
   /* ---------------- pronto ---------------- */
   appReady = true;
   renderHoje();
+  scheduleSheetSync();
 
   /* ---------------- hot reload hook ---------------- */
   function start(){ /* state already rendered synchronously above */ }
