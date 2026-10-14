@@ -1,0 +1,7 @@
+{
+  "appId": "com.elton.treinodieta",
+  "appName": "Treino e Dieta",
+  "webDir": "www",
+  "backgroundColor": "#12151c",
+  "ios": { "contentInset": "never", "backgroundColor": "#12151c" }
+}
