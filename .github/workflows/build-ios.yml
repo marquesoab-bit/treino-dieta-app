@@ -1,0 +1,44 @@
+name: Build iOS (.ipa sem assinatura)
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Organizar arquivos
+        run: |
+          mkdir -p www resources
+          cp index.html www/index.html
+          cp icon-1024.png resources/icon-1024.png
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Instalar dependencias
+        run: npm install
+      - name: Criar projeto iOS
+        run: npx cap add ios
+      - name: Aplicar icone
+        run: |
+          for f in ios/App/App/Assets.xcassets/AppIcon.appiconset/*.png; do cp resources/icon-1024.png "$f"; done
+      - name: Sincronizar app
+        run: npx cap sync ios
+      - name: Compilar sem assinatura
+        run: |
+          set -eo pipefail
+          cd ios/App
+          if [ -d App.xcworkspace ]; then TARGET="-workspace App.xcworkspace"; else TARGET="-project App.xcodeproj"; fi
+          xcodebuild $TARGET -scheme App -configuration Release -sdk iphoneos \
+            -destination 'generic/platform=iOS' -derivedDataPath "$GITHUB_WORKSPACE/build" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+      - name: Gerar ipa
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/App.app Payload/
+          zip -qry TreinoDieta.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TreinoDieta-ipa
+          path: TreinoDieta.ipa
